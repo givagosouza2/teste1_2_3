@@ -676,9 +676,7 @@ if (
 
         df_acc = read_sensor_file(
             uploaded_acc,
-            sensor="acc",
-            filter_cutoff=float(filter_cutoff),
-            filter_order=int(filter_order)
+            sensor="acc"
         )
 
         acc = preprocess_sensor(
@@ -707,9 +705,7 @@ if (
 
         df_gyro = read_sensor_file(
             uploaded_gyro,
-            sensor="gyro",
-            filter_cutoff=float(filter_cutoff),
-            filter_order=int(filter_order)
+            sensor="gyro"
         )
 
         gyro = preprocess_sensor(
