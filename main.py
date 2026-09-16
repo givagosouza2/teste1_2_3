@@ -22,9 +22,9 @@ def butterworth_filter(data, cutoff, fs, order=4, btype='low'):
 
 def kmeans_states(signal_data, n_states=5, random_state=42):
     """
-    Aplica K-means unidimensional e reorganiza os estados
-    de acordo com a magnitude crescente dos centróides.
+    K-means unidimensional.
 
+    Os estados são reorganizados pela magnitude dos centróides:
     Estado 0 = menor centróide
     Estado 1 = segundo menor
     ...
@@ -57,10 +57,15 @@ def kmeans_states(signal_data, n_states=5, random_state=42):
     return states, centers
 
 
-def baseline_state_detection(t, states, baseline_seconds=2.0, n_states=5):
+def baseline_state_detection(
+    t,
+    states,
+    baseline_seconds=2.0,
+    n_states=5
+):
     """
-    Estado de baseline = estado predominante nos
-    primeiros baseline_seconds segundos.
+    Estado de baseline = estado predominante nos primeiros
+    baseline_seconds segundos.
     """
     mask = t < baseline_seconds
 
@@ -86,33 +91,48 @@ def detect_start(
 ):
     """
     Início:
-    - busca após os primeiros 2 s;
-    - amostra anterior no estado baseline;
-    - sequência de N amostras em qualquer estado
-      numericamente superior ao baseline.
+    - busca após a janela usada para baseline;
+    - amostra anterior deve estar no estado baseline;
+    - as próximas N amostras devem estar em estados
+      numericamente superiores ao baseline.
     """
-
     first_search_index = np.searchsorted(
         t,
         baseline_seconds,
         side="left"
     )
 
-    first_search_index = max(1, first_search_index)
+    first_search_index = max(
+        1,
+        first_search_index
+    )
 
-    last_possible = len(states) - sequence_length + 1
+    last_possible = (
+        len(states) -
+        sequence_length +
+        1
+    )
 
-    for i in range(first_search_index, last_possible):
+    for i in range(
+        first_search_index,
+        last_possible
+    ):
 
         previous_is_baseline = (
-            states[i - 1] == baseline_state
+            states[i - 1] ==
+            baseline_state
         )
 
         sequence_is_above = np.all(
-            states[i:i + sequence_length] > baseline_state
+            states[
+                i:i + sequence_length
+            ] > baseline_state
         )
 
-        if previous_is_baseline and sequence_is_above:
+        if (
+            previous_is_baseline and
+            sequence_is_above
+        ):
             return i
 
     return None
@@ -129,24 +149,40 @@ def detect_end(
     após o início, identifica a primeira volta ao estado
     de baseline por N amostras consecutivas.
     """
-
     if start_index is None:
         return None
 
-    first_search_index = start_index + sequence_length
-    last_possible = len(states) - sequence_length + 1
+    first_search_index = (
+        start_index +
+        sequence_length
+    )
 
-    for i in range(first_search_index, last_possible):
+    last_possible = (
+        len(states) -
+        sequence_length +
+        1
+    )
+
+    for i in range(
+        first_search_index,
+        last_possible
+    ):
 
         previous_is_not_baseline = (
-            states[i - 1] != baseline_state
+            states[i - 1] !=
+            baseline_state
         )
 
         sequence_is_baseline = np.all(
-            states[i:i + sequence_length] == baseline_state
+            states[
+                i:i + sequence_length
+            ] == baseline_state
         )
 
-        if previous_is_not_baseline and sequence_is_baseline:
+        if (
+            previous_is_not_baseline and
+            sequence_is_baseline
+        ):
             return i
 
     return None
@@ -156,12 +192,21 @@ def transition_matrix(states, n_states=5):
     """
     Matriz descritiva de transição entre estados.
     """
-    matrix = np.zeros((n_states, n_states), dtype=float)
+    matrix = np.zeros(
+        (n_states, n_states),
+        dtype=float
+    )
 
-    for a, b in zip(states[:-1], states[1:]):
+    for a, b in zip(
+        states[:-1],
+        states[1:]
+    ):
         matrix[a, b] += 1
 
-    row_sum = matrix.sum(axis=1, keepdims=True)
+    row_sum = matrix.sum(
+        axis=1,
+        keepdims=True
+    )
 
     matrix = np.divide(
         matrix,
@@ -178,17 +223,20 @@ def transition_matrix(states, n_states=5):
 # ============================================================
 
 st.set_page_config(
-    page_title="Segmentação iTUG",
+    page_title="Segmentação iTUG - 1 Hz",
     layout="wide"
 )
 
-st.title("Segmentação automática do sinal de acelerometria")
+st.title(
+    "Segmentação automática do sinal de acelerometria"
+)
 
 st.write(
     """
-    O sinal é submetido a detrend, normalização em relação à gravidade
-    quando necessário, interpolação para 100 Hz, cálculo da norma
-    euclidiana, filtragem e segmentação por K-means.
+    O sinal é normalizado quando necessário, submetido a detrend,
+    interpolado para 100 Hz e convertido em norma euclidiana.
+    A norma euclidiana é então filtrada exclusivamente em
+    **1 Hz** e este sinal é utilizado para toda a segmentação.
     """
 )
 
@@ -197,7 +245,9 @@ st.write(
 # PARÂMETROS
 # ============================================================
 
-st.sidebar.header("Parâmetros da segmentação")
+st.sidebar.header(
+    "Parâmetros da segmentação"
+)
 
 n_states = st.sidebar.number_input(
     "Número de estados do K-means",
@@ -221,13 +271,6 @@ sequence_length = st.sidebar.number_input(
     max_value=500,
     value=5,
     step=1
-)
-
-segmentation_filter = st.sidebar.selectbox(
-    "Filtro usado na segmentação",
-    [1.0, 4.0, 10.0],
-    index=2,
-    format_func=lambda x: f"{x:g} Hz"
 )
 
 
@@ -255,7 +298,6 @@ if uploaded_acc_iTUG is not None:
         dtype=str
     )
 
-    # Mantém as quatro primeiras colunas
     df = df.iloc[:, 0:4].copy()
 
     df.columns = [
@@ -265,46 +307,71 @@ if uploaded_acc_iTUG is not None:
         "Acc_Z"
     ]
 
-    # Converte em números e remove possíveis cabeçalhos repetidos
     for column in df.columns:
         df[column] = pd.to_numeric(
             df[column],
             errors="coerce"
         )
 
+    # Remove eventuais cabeçalhos repetidos
     df = df.dropna().copy()
 
-    df = df.sort_values("Tempo")
+    df = df.sort_values(
+        "Tempo"
+    )
+
     df = df.drop_duplicates(
         subset="Tempo",
         keep="first"
     )
 
-    df = df.reset_index(drop=True)
+    df = df.reset_index(
+        drop=True
+    )
 
     if len(df) < 20:
-        st.error("Poucos dados válidos no arquivo.")
+        st.error(
+            "Poucos dados válidos no arquivo."
+        )
         st.stop()
 
-    time = df["Tempo"].to_numpy(dtype=float)
-    x = df["Acc_X"].to_numpy(dtype=float)
-    y = df["Acc_Y"].to_numpy(dtype=float)
-    z = df["Acc_Z"].to_numpy(dtype=float)
+    time = df["Tempo"].to_numpy(
+        dtype=float
+    )
+
+    x = df["Acc_X"].to_numpy(
+        dtype=float
+    )
+
+    y = df["Acc_Y"].to_numpy(
+        dtype=float
+    )
+
+    z = df["Acc_Z"].to_numpy(
+        dtype=float
+    )
 
 
     # ========================================================
-    # PRÉ-PROCESSAMENTO ORIGINAL
+    # NORMALIZAÇÃO E DETREND
     # ========================================================
 
-    # Normalização para g quando os dados parecem estar em m/s²
     if (
         np.max(np.abs(x)) > 9 or
         np.max(np.abs(y)) > 9 or
         np.max(np.abs(z)) > 9
     ):
-        x = signal.detrend(x / 9.81)
-        y = signal.detrend(y / 9.81)
-        z = signal.detrend(z / 9.81)
+        x = signal.detrend(
+            x / 9.81
+        )
+
+        y = signal.detrend(
+            y / 9.81
+        )
+
+        z = signal.detrend(
+            z / 9.81
+        )
 
         unidade = "g"
 
@@ -331,6 +398,7 @@ if uploaded_acc_iTUG is not None:
         x,
         kind="linear"
     )
+
     x = interpf(time_)
 
     interpf = scipy.interpolate.interp1d(
@@ -338,6 +406,7 @@ if uploaded_acc_iTUG is not None:
         y,
         kind="linear"
     )
+
     y = interpf(time_)
 
     interpf = scipy.interpolate.interp1d(
@@ -345,10 +414,14 @@ if uploaded_acc_iTUG is not None:
         z,
         kind="linear"
     )
+
     z = interpf(time_)
 
-    # tempo em segundos, começando em zero
-    t = (time_ - time_[0]) / 1000
+    # Tempo em segundos iniciando em zero
+    t = (
+        time_ -
+        time_[0]
+    ) / 1000
 
 
     # ========================================================
@@ -363,12 +436,12 @@ if uploaded_acc_iTUG is not None:
 
 
     # ========================================================
-    # FILTRAGEM EM 1, 4 E 10 Hz
+    # FILTRO EXCLUSIVAMENTE EM 1 Hz
     # ========================================================
 
     fs = 100
 
-    norm_1 = butterworth_filter(
+    norm_1hz = butterworth_filter(
         norm_waveform,
         1,
         fs,
@@ -376,39 +449,13 @@ if uploaded_acc_iTUG is not None:
         btype='low'
     )
 
-    norm_4 = butterworth_filter(
-        norm_waveform,
-        4,
-        fs,
-        order=4,
-        btype='low'
-    )
-
-    norm_10 = butterworth_filter(
-        norm_waveform,
-        10,
-        fs,
-        order=4,
-        btype='low'
-    )
-
-    filtered_signals = {
-        1.0: norm_1,
-        4.0: norm_4,
-        10.0: norm_10
-    }
-
-    norm_segment = filtered_signals[
-        segmentation_filter
-    ]
-
 
     # ========================================================
-    # K-MEANS
+    # K-MEANS NO SINAL DE 1 Hz
     # ========================================================
 
     states, centers = kmeans_states(
-        norm_segment,
+        norm_1hz,
         n_states=int(n_states)
     )
 
@@ -417,11 +464,15 @@ if uploaded_acc_iTUG is not None:
     # BASELINE
     # ========================================================
 
-    baseline_state, baseline_counts = baseline_state_detection(
-        t,
-        states,
-        baseline_seconds=float(baseline_seconds),
-        n_states=int(n_states)
+    baseline_state, baseline_counts = (
+        baseline_state_detection(
+            t,
+            states,
+            baseline_seconds=float(
+                baseline_seconds
+            ),
+            n_states=int(n_states)
+        )
     )
 
 
@@ -433,8 +484,12 @@ if uploaded_acc_iTUG is not None:
         t,
         states,
         baseline_state,
-        baseline_seconds=float(baseline_seconds),
-        sequence_length=int(sequence_length)
+        baseline_seconds=float(
+            baseline_seconds
+        ),
+        sequence_length=int(
+            sequence_length
+        )
     )
 
 
@@ -446,7 +501,9 @@ if uploaded_acc_iTUG is not None:
         states,
         baseline_state,
         start_index,
-        sequence_length=int(sequence_length)
+        sequence_length=int(
+            sequence_length
+        )
     )
 
 
@@ -454,9 +511,13 @@ if uploaded_acc_iTUG is not None:
     # RESULTADOS
     # ========================================================
 
-    st.subheader("Resultados")
+    st.subheader(
+        "Resultados da segmentação"
+    )
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = (
+        st.columns(4)
+    )
 
     col1.metric(
         "Estado de baseline",
@@ -464,13 +525,18 @@ if uploaded_acc_iTUG is not None:
     )
 
     if start_index is not None:
-        start_time = t[start_index]
+
+        start_time = t[
+            start_index
+        ]
 
         col2.metric(
             "Início",
             f"{start_time:.3f} s"
         )
+
     else:
+
         start_time = None
 
         col2.metric(
@@ -478,14 +544,20 @@ if uploaded_acc_iTUG is not None:
             "Não encontrado"
         )
 
+
     if end_index is not None:
-        end_time = t[end_index]
+
+        end_time = t[
+            end_index
+        ]
 
         col3.metric(
             "Final",
             f"{end_time:.3f} s"
         )
+
     else:
+
         end_time = None
 
         col3.metric(
@@ -493,10 +565,12 @@ if uploaded_acc_iTUG is not None:
             "Não encontrado"
         )
 
+
     if (
         start_time is not None and
         end_time is not None
     ):
+
         activity_time = (
             end_time -
             start_time
@@ -508,6 +582,7 @@ if uploaded_acc_iTUG is not None:
         )
 
     else:
+
         activity_time = None
 
         col4.metric(
@@ -517,34 +592,55 @@ if uploaded_acc_iTUG is not None:
 
 
     # ========================================================
-    # GRÁFICO DOS FILTROS
+    # GRÁFICO DO SINAL DE 1 Hz
     # ========================================================
 
     st.subheader(
-        "Norma euclidiana filtrada"
+        "Norma euclidiana filtrada em 1 Hz"
     )
 
     fig1, ax1 = plt.subplots(
-        figsize=(12, 4)
+        figsize=(12, 5)
     )
 
     ax1.plot(
         t,
-        norm_1,
-        label="1 Hz"
+        norm_1hz,
+        'k',
+        linewidth=1.5,
+        label="Norma euclidiana - 1 Hz"
     )
 
-    ax1.plot(
-        t,
-        norm_4,
-        label="4 Hz"
+    ax1.axvspan(
+        0,
+        baseline_seconds,
+        alpha=0.15,
+        label="Baseline inicial"
     )
 
-    ax1.plot(
-        t,
-        norm_10,
-        label="10 Hz"
-    )
+    if start_index is not None:
+
+        ax1.axvline(
+            t[start_index],
+            linestyle='--',
+            linewidth=2,
+            label=(
+                f"Início = "
+                f"{t[start_index]:.2f} s"
+            )
+        )
+
+    if end_index is not None:
+
+        ax1.axvline(
+            t[end_index],
+            linestyle=':',
+            linewidth=2,
+            label=(
+                f"Fim = "
+                f"{t[end_index]:.2f} s"
+            )
+        )
 
     ax1.set_xlabel(
         "Tempo (s)"
@@ -552,6 +648,10 @@ if uploaded_acc_iTUG is not None:
 
     ax1.set_ylabel(
         f"Norma da aceleração ({unidade})"
+    )
+
+    ax1.set_title(
+        "Sinal de 1 Hz utilizado na segmentação"
     )
 
     ax1.legend()
@@ -564,34 +664,32 @@ if uploaded_acc_iTUG is not None:
 
 
     # ========================================================
-    # GRÁFICO DE SEGMENTAÇÃO
+    # ESTADOS DO K-MEANS
     # ========================================================
 
     st.subheader(
-        "Segmentação automática"
+        "Estados do K-means"
     )
 
     fig2, ax2 = plt.subplots(
-        figsize=(12, 5)
+        figsize=(12, 3.5)
     )
 
-    ax2.plot(
+    ax2.step(
         t,
-        norm_segment,
-        'k',
-        linewidth=1.2,
-        label=(
-            f"Norma - "
-            f"{segmentation_filter:g} Hz"
-        )
+        states,
+        where="post",
+        linewidth=1
     )
 
-    # janela da baseline
-    ax2.axvspan(
-        0,
-        baseline_seconds,
-        alpha=0.15,
-        label="Baseline inicial"
+    ax2.axhline(
+        baseline_state,
+        linestyle='--',
+        linewidth=1.5,
+        label=(
+            f"Baseline = "
+            f"estado {baseline_state}"
+        )
     )
 
     if start_index is not None:
@@ -599,11 +697,7 @@ if uploaded_acc_iTUG is not None:
         ax2.axvline(
             t[start_index],
             linestyle='--',
-            linewidth=2,
-            label=(
-                f"Início = "
-                f"{t[start_index]:.2f} s"
-            )
+            linewidth=2
         )
 
     if end_index is not None:
@@ -611,11 +705,7 @@ if uploaded_acc_iTUG is not None:
         ax2.axvline(
             t[end_index],
             linestyle=':',
-            linewidth=2,
-            label=(
-                f"Fim = "
-                f"{t[end_index]:.2f} s"
-            )
+            linewidth=2
         )
 
     ax2.set_xlabel(
@@ -623,7 +713,17 @@ if uploaded_acc_iTUG is not None:
     )
 
     ax2.set_ylabel(
-        f"Norma da aceleração ({unidade})"
+        "Estado"
+    )
+
+    ax2.set_yticks(
+        np.arange(
+            int(n_states)
+        )
+    )
+
+    ax2.set_title(
+        "Classificação do sinal de 1 Hz em estados"
     )
 
     ax2.legend()
@@ -636,70 +736,6 @@ if uploaded_acc_iTUG is not None:
 
 
     # ========================================================
-    # GRÁFICO DOS ESTADOS
-    # ========================================================
-
-    st.subheader(
-        "Estados do K-means ao longo do tempo"
-    )
-
-    fig3, ax3 = plt.subplots(
-        figsize=(12, 3.5)
-    )
-
-    ax3.step(
-        t,
-        states,
-        where="post",
-        linewidth=1
-    )
-
-    ax3.axhline(
-        baseline_state,
-        linestyle='--',
-        linewidth=1.5,
-        label=(
-            f"Baseline = "
-            f"estado {baseline_state}"
-        )
-    )
-
-    if start_index is not None:
-        ax3.axvline(
-            t[start_index],
-            linestyle='--',
-            linewidth=2
-        )
-
-    if end_index is not None:
-        ax3.axvline(
-            t[end_index],
-            linestyle=':',
-            linewidth=2
-        )
-
-    ax3.set_xlabel(
-        "Tempo (s)"
-    )
-
-    ax3.set_ylabel(
-        "Estado"
-    )
-
-    ax3.set_yticks(
-        np.arange(int(n_states))
-    )
-
-    ax3.legend()
-
-    ax3.grid(
-        alpha=0.3
-    )
-
-    st.pyplot(fig3)
-
-
-    # ========================================================
     # CENTRÓIDES
     # ========================================================
 
@@ -708,12 +744,18 @@ if uploaded_acc_iTUG is not None:
     )
 
     centers_df = pd.DataFrame({
-        "Estado": np.arange(int(n_states)),
+        "Estado": np.arange(
+            int(n_states)
+        ),
         "Centróide": centers,
-        "N na baseline": baseline_counts,
+        "N na baseline": (
+            baseline_counts
+        ),
         "Baseline": [
             i == baseline_state
-            for i in range(int(n_states))
+            for i in range(
+                int(n_states)
+            )
         ]
     })
 
@@ -741,11 +783,15 @@ if uploaded_acc_iTUG is not None:
         matrix,
         index=[
             f"Estado {i}"
-            for i in range(int(n_states))
+            for i in range(
+                int(n_states)
+            )
         ],
         columns=[
             f"→ {i}"
-            for i in range(int(n_states))
+            for i in range(
+                int(n_states)
+            )
         ]
     )
 
@@ -767,30 +813,34 @@ if uploaded_acc_iTUG is not None:
 
     processed_df = pd.DataFrame({
         "Tempo_s": t,
-        "X_detrend": x,
-        "Y_detrend": y,
-        "Z_detrend": z,
-        "Norma_bruta": norm_waveform,
-        "Norma_1Hz": norm_1,
-        "Norma_4Hz": norm_4,
-        "Norma_10Hz": norm_10,
+        "Norma_1Hz": norm_1hz,
         "Estado": states
     })
 
-    processed_df["Baseline"] = (
-        states == baseline_state
+    processed_df[
+        "Baseline"
+    ] = (
+        states ==
+        baseline_state
     )
 
-    processed_df["Inicio"] = False
-    processed_df["Fim"] = False
+    processed_df[
+        "Inicio"
+    ] = False
+
+    processed_df[
+        "Fim"
+    ] = False
 
     if start_index is not None:
+
         processed_df.loc[
             start_index,
             "Inicio"
         ] = True
 
     if end_index is not None:
+
         processed_df.loc[
             end_index,
             "Fim"
@@ -800,6 +850,7 @@ if uploaded_acc_iTUG is not None:
     with st.expander(
         "Mostrar tabela completa"
     ):
+
         st.dataframe(
             processed_df,
             use_container_width=True
@@ -817,13 +868,15 @@ if uploaded_acc_iTUG is not None:
     st.download_button(
         "Baixar dados processados",
         data=csv,
-        file_name="segmentacao_iTUG.csv",
+        file_name=(
+            "segmentacao_iTUG_1Hz.csv"
+        ),
         mime="text/csv"
     )
 
 
     # ========================================================
-    # DESCRIÇÃO DA REGRA
+    # REGRA
     # ========================================================
 
     with st.expander(
@@ -832,25 +885,30 @@ if uploaded_acc_iTUG is not None:
 
         st.markdown(
             f"""
+### Sinal analisado
+
+Toda a segmentação é realizada exclusivamente sobre
+a **norma euclidiana filtrada em 1 Hz**.
+
 ### Baseline
 
 O estado predominante nos primeiros
 **{baseline_seconds:g} segundos**
-é considerado o estado da baseline.
+é considerado o estado de baseline.
 
-### Início da atividade
+### Início
 
 O início é identificado quando:
 
-- a amostra anterior pertence ao estado da baseline;
+- a amostra anterior pertence ao estado de baseline;
 - aparecem **{sequence_length} amostras consecutivas**;
 - todas pertencem a estados numericamente superiores
-  ao estado da baseline.
+  ao estado de baseline.
 
-### Final da atividade
+### Final
 
 Após o início, procura-se a **primeira sequência de
-{sequence_length} amostras consecutivas no estado da baseline**.
+{sequence_length} amostras consecutivas no estado de baseline**.
 
 A primeira amostra dessa sequência é considerada o final.
 """
