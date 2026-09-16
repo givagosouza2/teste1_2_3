@@ -53,7 +53,7 @@ def read_sensor_file(uploaded_file, sensor="acc"):
     return df
 
 
-def preprocess_sensor(df, sensor="acc", fs_target=100):
+def preprocess_sensor(df, sensor="acc", fs_target=100, filter_cutoff=1.0, filter_order=4):
     """
     Detrend + interpolação 100 Hz + norma euclidiana + filtro 1 Hz.
 
@@ -116,12 +116,12 @@ def preprocess_sensor(df, sensor="acc", fs_target=100):
         z**2
     )
 
-    # filtro de 1 Hz
-    norm_1hz = butterworth_filter(
+    # filtro passa-baixa ajustável
+    norm_filtered = butterworth_filter(
         norm,
-        cutoff=1,
+        cutoff=filter_cutoff,
         fs=fs_target,
-        order=4,
+        order=filter_order,
         btype="low"
     )
 
@@ -131,8 +131,10 @@ def preprocess_sensor(df, sensor="acc", fs_target=100):
         "y": y,
         "z": z,
         "norm": norm,
-        "norm_1hz": norm_1hz,
-        "unit": unit
+        "norm_filtered": norm_filtered,
+        "unit": unit,
+        "filter_cutoff": filter_cutoff,
+        "filter_order": filter_order
     }
 
 
@@ -338,7 +340,7 @@ def show_results(
     ylabel
 ):
     t = processed["t"]
-    signal_1hz = processed["norm_1hz"]
+    signal_1hz = processed["norm_filtered"]
 
     states = segmentation["states"]
     centers = segmentation["centers"]
@@ -443,7 +445,7 @@ def show_results(
     ax.set_xlabel("Tempo (s)")
     ax.set_ylabel(ylabel)
     ax.set_title(
-        f"{title} — norma euclidiana filtrada em 1 Hz"
+        f"{title} — norma euclidiana filtrada em {processed['filter_cutoff']:.1f} Hz"
     )
     ax.grid(alpha=0.3)
     ax.legend()
@@ -584,7 +586,7 @@ st.write(
     """
     O acelerômetro e o giroscópio são analisados separadamente.
     Para cada sensor é calculada a norma euclidiana, filtrada
-    em **1 Hz**, e a segmentação é realizada por K-means.
+    com uma frequência de corte ajustável, e a segmentação é realizada por K-means.
     """
 )
 
@@ -618,6 +620,22 @@ sequence_length = st.sidebar.number_input(
     min_value=1,
     max_value=500,
     value=5,
+    step=1
+)
+
+filter_cutoff = st.sidebar.number_input(
+    "Frequência de corte do filtro passa-baixa (Hz)",
+    min_value=0.1,
+    max_value=20.0,
+    value=1.0,
+    step=0.1
+)
+
+filter_order = st.sidebar.number_input(
+    "Ordem do filtro Butterworth",
+    min_value=1,
+    max_value=8,
+    value=4,
     step=1
 )
 
@@ -658,17 +676,21 @@ if (
 
         df_acc = read_sensor_file(
             uploaded_acc,
-            sensor="acc"
+            sensor="acc",
+            filter_cutoff=float(filter_cutoff),
+            filter_order=int(filter_order)
         )
 
         acc = preprocess_sensor(
             df_acc,
-            sensor="acc"
+            sensor="acc",
+            filter_cutoff=float(filter_cutoff),
+            filter_order=int(filter_order)
         )
 
         acc_seg = segment_signal(
             acc["t"],
-            acc["norm_1hz"],
+            acc["norm_filtered"],
             n_states=int(n_states),
             baseline_seconds=float(
                 baseline_seconds
@@ -685,17 +707,21 @@ if (
 
         df_gyro = read_sensor_file(
             uploaded_gyro,
-            sensor="gyro"
+            sensor="gyro",
+            filter_cutoff=float(filter_cutoff),
+            filter_order=int(filter_order)
         )
 
         gyro = preprocess_sensor(
             df_gyro,
-            sensor="gyro"
+            sensor="gyro",
+            filter_cutoff=float(filter_cutoff),
+            filter_order=int(filter_order)
         )
 
         gyro_seg = segment_signal(
             gyro["t"],
-            gyro["norm_1hz"],
+            gyro["norm_filtered"],
             n_states=int(n_states),
             baseline_seconds=float(
                 baseline_seconds
@@ -810,7 +836,7 @@ if (
                     index=False
                 ).encode("utf-8"),
                 file_name=(
-                    "acelerometro_segmentado_1Hz.csv"
+                    "acelerometro_segmentado.csv"
                 ),
                 mime="text/csv"
             )
@@ -823,7 +849,7 @@ if (
                     index=False
                 ).encode("utf-8"),
                 file_name=(
-                    "giroscopio_segmentado_1Hz.csv"
+                    "giroscopio_segmentado.csv"
                 ),
                 mime="text/csv"
             )
