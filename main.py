@@ -9,37 +9,146 @@ from sklearn.cluster import KMeans
 
 
 # ============================================================
-# FUNÇÕES
+# FUNÇÕES GERAIS
 # ============================================================
 
 def butterworth_filter(data, cutoff, fs, order=4, btype='low'):
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
-    b, a = butter(order, normal_cutoff, btype, analog=False)
-    y = filtfilt(b, a, data)
-    return y
+    b, a = butter(order, normal_cutoff, btype=btype, analog=False)
+    return filtfilt(b, a, data)
 
 
-def kmeans_states(signal_data, n_states=5, random_state=42):
+def read_sensor_file(uploaded_file, sensor="acc"):
+    uploaded_file.seek(0)
+
+    df = pd.read_csv(
+        uploaded_file,
+        sep=";",
+        dtype=str
+    )
+
+    if df.shape[1] < 4:
+        raise ValueError("O arquivo deve possuir pelo menos quatro colunas.")
+
+    df = df.iloc[:, :4].copy()
+
+    if sensor == "acc":
+        df.columns = ["Tempo", "X", "Y", "Z"]
+    else:
+        df.columns = ["Tempo", "X", "Y", "Z"]
+
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Remove cabeçalhos repetidos ou linhas inválidas
+    df = df.dropna().copy()
+    df = df.sort_values("Tempo")
+    df = df.drop_duplicates(subset="Tempo", keep="first")
+    df = df.reset_index(drop=True)
+
+    if len(df) < 20:
+        raise ValueError("Poucos dados válidos no arquivo.")
+
+    return df
+
+
+def preprocess_sensor(df, sensor="acc", fs_target=100):
     """
-    K-means unidimensional.
+    Detrend + interpolação 100 Hz + norma euclidiana + filtro 1 Hz.
 
-    Os estados são reorganizados pela magnitude dos centróides:
-    Estado 0 = menor centróide
-    Estado 1 = segundo menor
-    ...
+    Acelerômetro:
+      normaliza por 9,81 quando os dados parecem estar em m/s².
+
+    Giroscópio:
+      não realiza normalização por gravidade.
     """
-    values = np.asarray(signal_data).reshape(-1, 1)
+    time = df["Tempo"].to_numpy(float)
+    x = df["X"].to_numpy(float)
+    y = df["Y"].to_numpy(float)
+    z = df["Z"].to_numpy(float)
 
-    model = KMeans(
+    if sensor == "acc":
+        if (
+            np.max(np.abs(x)) > 9 or
+            np.max(np.abs(y)) > 9 or
+            np.max(np.abs(z)) > 9
+        ):
+            x = x / 9.81
+            y = y / 9.81
+            z = z / 9.81
+            unit = "g"
+        else:
+            unit = "unidade original"
+    else:
+        unit = "velocidade angular"
+
+    # detrend
+    x = signal.detrend(x)
+    y = signal.detrend(y)
+    z = signal.detrend(z)
+
+    # interpolação a 100 Hz -> 10 ms
+    time_uniform = np.arange(
+        start=time[0],
+        stop=time[-1],
+        step=1000 / fs_target
+    )
+
+    x = scipy.interpolate.interp1d(
+        time, x, kind="linear"
+    )(time_uniform)
+
+    y = scipy.interpolate.interp1d(
+        time, y, kind="linear"
+    )(time_uniform)
+
+    z = scipy.interpolate.interp1d(
+        time, z, kind="linear"
+    )(time_uniform)
+
+    t = (time_uniform - time_uniform[0]) / 1000.0
+
+    # norma euclidiana
+    norm = np.sqrt(
+        x**2 +
+        y**2 +
+        z**2
+    )
+
+    # filtro de 1 Hz
+    norm_1hz = butterworth_filter(
+        norm,
+        cutoff=1,
+        fs=fs_target,
+        order=4,
+        btype="low"
+    )
+
+    return {
+        "t": t,
+        "x": x,
+        "y": y,
+        "z": z,
+        "norm": norm,
+        "norm_1hz": norm_1hz,
+        "unit": unit
+    }
+
+
+def kmeans_states(values, n_states=5, random_state=42):
+    values = np.asarray(values).reshape(-1, 1)
+
+    km = KMeans(
         n_clusters=n_states,
         random_state=random_state,
         n_init=20
     )
 
-    labels_raw = model.fit_predict(values)
-    centers_raw = model.cluster_centers_.ravel()
+    labels_raw = km.fit_predict(values)
+    centers_raw = km.cluster_centers_.ravel()
 
+    # ordena os estados pela magnitude dos centróides
     order = np.argsort(centers_raw)
 
     mapping = {
@@ -57,27 +166,22 @@ def kmeans_states(signal_data, n_states=5, random_state=42):
     return states, centers
 
 
-def baseline_state_detection(
+def identify_baseline(
     t,
     states,
     baseline_seconds=2.0,
     n_states=5
 ):
-    """
-    Estado de baseline = estado predominante nos primeiros
-    baseline_seconds segundos.
-    """
     mask = t < baseline_seconds
-
-    if not np.any(mask):
-        return None, None
 
     counts = np.bincount(
         states[mask],
         minlength=n_states
     )
 
-    baseline_state = int(np.argmax(counts))
+    baseline_state = int(
+        np.argmax(counts)
+    )
 
     return baseline_state, counts
 
@@ -89,49 +193,31 @@ def detect_start(
     baseline_seconds=2.0,
     sequence_length=5
 ):
-    """
-    Início:
-    - busca após a janela usada para baseline;
-    - amostra anterior deve estar no estado baseline;
-    - as próximas N amostras devem estar em estados
-      numericamente superiores ao baseline.
-    """
-    first_search_index = np.searchsorted(
-        t,
-        baseline_seconds,
-        side="left"
-    )
-
-    first_search_index = max(
+    first = max(
         1,
-        first_search_index
+        np.searchsorted(
+            t,
+            baseline_seconds,
+            side="left"
+        )
     )
 
-    last_possible = (
+    last = (
         len(states) -
         sequence_length +
         1
     )
 
-    for i in range(
-        first_search_index,
-        last_possible
-    ):
-
-        previous_is_baseline = (
-            states[i - 1] ==
-            baseline_state
-        )
-
-        sequence_is_above = np.all(
-            states[
-                i:i + sequence_length
-            ] > baseline_state
-        )
+    for i in range(first, last):
 
         if (
-            previous_is_baseline and
-            sequence_is_above
+            states[i - 1] == baseline_state
+            and
+            np.all(
+                states[
+                    i:i + sequence_length
+                ] > baseline_state
+            )
         ):
             return i
 
@@ -144,54 +230,81 @@ def detect_end(
     start_index,
     sequence_length=5
 ):
-    """
-    Final:
-    após o início, identifica a primeira volta ao estado
-    de baseline por N amostras consecutivas.
-    """
     if start_index is None:
         return None
 
-    first_search_index = (
+    first = (
         start_index +
         sequence_length
     )
 
-    last_possible = (
+    last = (
         len(states) -
         sequence_length +
         1
     )
 
-    for i in range(
-        first_search_index,
-        last_possible
-    ):
-
-        previous_is_not_baseline = (
-            states[i - 1] !=
-            baseline_state
-        )
-
-        sequence_is_baseline = np.all(
-            states[
-                i:i + sequence_length
-            ] == baseline_state
-        )
+    for i in range(first, last):
 
         if (
-            previous_is_not_baseline and
-            sequence_is_baseline
+            states[i - 1] != baseline_state
+            and
+            np.all(
+                states[
+                    i:i + sequence_length
+                ] == baseline_state
+            )
         ):
             return i
 
     return None
 
 
+def segment_signal(
+    t,
+    signal_1hz,
+    n_states=5,
+    baseline_seconds=2.0,
+    sequence_length=5
+):
+    states, centers = kmeans_states(
+        signal_1hz,
+        n_states=n_states
+    )
+
+    baseline_state, counts = identify_baseline(
+        t,
+        states,
+        baseline_seconds=baseline_seconds,
+        n_states=n_states
+    )
+
+    start_index = detect_start(
+        t,
+        states,
+        baseline_state,
+        baseline_seconds=baseline_seconds,
+        sequence_length=sequence_length
+    )
+
+    end_index = detect_end(
+        states,
+        baseline_state,
+        start_index,
+        sequence_length=sequence_length
+    )
+
+    return {
+        "states": states,
+        "centers": centers,
+        "baseline_state": baseline_state,
+        "baseline_counts": counts,
+        "start_index": start_index,
+        "end_index": end_index
+    }
+
+
 def transition_matrix(states, n_states=5):
-    """
-    Matriz descritiva de transição entre estados.
-    """
     matrix = np.zeros(
         (n_states, n_states),
         dtype=float
@@ -208,14 +321,250 @@ def transition_matrix(states, n_states=5):
         keepdims=True
     )
 
-    matrix = np.divide(
+    return np.divide(
         matrix,
         row_sum,
         out=np.zeros_like(matrix),
         where=row_sum != 0
     )
 
-    return matrix
+
+def show_results(
+    title,
+    processed,
+    segmentation,
+    baseline_seconds,
+    sequence_length,
+    ylabel
+):
+    t = processed["t"]
+    signal_1hz = processed["norm_1hz"]
+
+    states = segmentation["states"]
+    centers = segmentation["centers"]
+    baseline_state = segmentation["baseline_state"]
+    counts = segmentation["baseline_counts"]
+    start_index = segmentation["start_index"]
+    end_index = segmentation["end_index"]
+
+    st.header(title)
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Estado de baseline",
+        baseline_state
+    )
+
+    if start_index is not None:
+        start_time = float(
+            t[start_index]
+        )
+        c2.metric(
+            "Início",
+            f"{start_time:.3f} s"
+        )
+    else:
+        start_time = None
+        c2.metric(
+            "Início",
+            "Não encontrado"
+        )
+
+    if end_index is not None:
+        end_time = float(
+            t[end_index]
+        )
+        c3.metric(
+            "Fim",
+            f"{end_time:.3f} s"
+        )
+    else:
+        end_time = None
+        c3.metric(
+            "Fim",
+            "Não encontrado"
+        )
+
+    if (
+        start_time is not None and
+        end_time is not None
+    ):
+        duration = end_time - start_time
+        c4.metric(
+            "Duração",
+            f"{duration:.3f} s"
+        )
+    else:
+        duration = None
+        c4.metric(
+            "Duração",
+            "-"
+        )
+
+    # --------------------------------------------------------
+    # GRÁFICO PRINCIPAL
+    # --------------------------------------------------------
+    fig, ax = plt.subplots(
+        figsize=(12, 4.5)
+    )
+
+    ax.plot(
+        t,
+        signal_1hz,
+        "k",
+        linewidth=1.5,
+        label="Norma euclidiana - 1 Hz"
+    )
+
+    ax.axvspan(
+        0,
+        baseline_seconds,
+        alpha=0.15,
+        label="Baseline inicial"
+    )
+
+    if start_index is not None:
+        ax.axvline(
+            t[start_index],
+            linestyle="--",
+            linewidth=2,
+            label=f"Início = {t[start_index]:.2f} s"
+        )
+
+    if end_index is not None:
+        ax.axvline(
+            t[end_index],
+            linestyle=":",
+            linewidth=2,
+            label=f"Fim = {t[end_index]:.2f} s"
+        )
+
+    ax.set_xlabel("Tempo (s)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(
+        f"{title} — norma euclidiana filtrada em 1 Hz"
+    )
+    ax.grid(alpha=0.3)
+    ax.legend()
+
+    st.pyplot(fig)
+
+    # --------------------------------------------------------
+    # ESTADOS
+    # --------------------------------------------------------
+    fig_states, ax_states = plt.subplots(
+        figsize=(12, 3.2)
+    )
+
+    ax_states.step(
+        t,
+        states,
+        where="post",
+        linewidth=1
+    )
+
+    ax_states.axhline(
+        baseline_state,
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Baseline = estado {baseline_state}"
+    )
+
+    if start_index is not None:
+        ax_states.axvline(
+            t[start_index],
+            linestyle="--",
+            linewidth=2
+        )
+
+    if end_index is not None:
+        ax_states.axvline(
+            t[end_index],
+            linestyle=":",
+            linewidth=2
+        )
+
+    ax_states.set_xlabel("Tempo (s)")
+    ax_states.set_ylabel("Estado")
+    ax_states.set_yticks(
+        np.arange(len(centers))
+    )
+    ax_states.set_title(
+        f"Estados do K-means — {title}"
+    )
+    ax_states.grid(alpha=0.3)
+    ax_states.legend()
+
+    st.pyplot(fig_states)
+
+    # --------------------------------------------------------
+    # CENTRÓIDES
+    # --------------------------------------------------------
+    with st.expander(
+        f"Centróides e baseline — {title}"
+    ):
+
+        centers_df = pd.DataFrame({
+            "Estado": np.arange(
+                len(centers)
+            ),
+            "Centróide": centers,
+            "N na baseline": counts,
+            "Estado baseline": [
+                i == baseline_state
+                for i in range(
+                    len(centers)
+                )
+            ]
+        })
+
+        st.dataframe(
+            centers_df,
+            hide_index=True,
+            use_container_width=True
+        )
+
+    # --------------------------------------------------------
+    # MATRIZ DE TRANSIÇÃO
+    # --------------------------------------------------------
+    with st.expander(
+        f"Matriz de transição — {title}"
+    ):
+
+        matrix = transition_matrix(
+            states,
+            n_states=len(centers)
+        )
+
+        matrix_df = pd.DataFrame(
+            matrix,
+            index=[
+                f"Estado {i}"
+                for i in range(
+                    len(centers)
+                )
+            ],
+            columns=[
+                f"→ {i}"
+                for i in range(
+                    len(centers)
+                )
+            ]
+        )
+
+        st.dataframe(
+            matrix_df.style.format(
+                "{:.3f}"
+            ),
+            use_container_width=True
+        )
+
+    return {
+        "start_time": start_time,
+        "end_time": end_time,
+        "duration": duration
+    }
 
 
 # ============================================================
@@ -223,19 +572,19 @@ def transition_matrix(states, n_states=5):
 # ============================================================
 
 st.set_page_config(
-    page_title="Segmentação iTUG - Giroscópio 1 Hz",
+    page_title="iTUG - Acelerômetro + Giroscópio",
     layout="wide"
 )
 
 st.title(
-    "Segmentação automática do sinal do giroscópio"
+    "Segmentação iTUG — Acelerômetro e Giroscópio"
 )
 
 st.write(
     """
-    O sinal do giroscópio é submetido a detrend, interpolado para 100 Hz,
-    convertido em norma euclidiana e filtrado em **1 Hz**.
-    A segmentação é realizada sobre essa norma filtrada usando K-means.
+    O acelerômetro e o giroscópio são analisados separadamente.
+    Para cada sensor é calculada a norma euclidiana, filtrada
+    em **1 Hz**, e a segmentação é realizada por K-means.
     """
 )
 
@@ -245,11 +594,11 @@ st.write(
 # ============================================================
 
 st.sidebar.header(
-    "Parâmetros da segmentação"
+    "Parâmetros"
 )
 
 n_states = st.sidebar.number_input(
-    "Número de estados do K-means",
+    "Número de estados",
     min_value=2,
     max_value=10,
     value=5,
@@ -257,7 +606,7 @@ n_states = st.sidebar.number_input(
 )
 
 baseline_seconds = st.sidebar.number_input(
-    "Duração da baseline inicial (s)",
+    "Baseline inicial (s)",
     min_value=0.5,
     max_value=10.0,
     value=2.0,
@@ -265,7 +614,7 @@ baseline_seconds = st.sidebar.number_input(
 )
 
 sequence_length = st.sidebar.number_input(
-    "Número de amostras consecutivas",
+    "Amostras consecutivas",
     min_value=1,
     max_value=500,
     value=5,
@@ -274,624 +623,221 @@ sequence_length = st.sidebar.number_input(
 
 
 # ============================================================
-# UPLOAD
+# UPLOAD DOS DOIS SENSORES
 # ============================================================
 
-uploaded_gyro_iTUG = st.file_uploader(
-    "Carregue o arquivo de texto do giroscópio",
-    type=["txt"]
-)
+col_upload1, col_upload2 = st.columns(2)
 
+with col_upload1:
 
-if uploaded_gyro_iTUG is not None:
-
-    # ========================================================
-    # LEITURA
-    # ========================================================
-
-    custom_separator = ';'
-
-    df = pd.read_csv(
-        uploaded_gyro_iTUG,
-        sep=custom_separator,
-        dtype=str
+    uploaded_acc = st.file_uploader(
+        "Arquivo do acelerômetro",
+        type=["txt"],
+        key="acc"
     )
 
-    df = df.iloc[:, 0:4].copy()
+with col_upload2:
 
-    df.columns = [
-        "Tempo",
-        "Gyro_X",
-        "Gyro_Y",
-        "Gyro_Z"
-    ]
+    uploaded_gyro = st.file_uploader(
+        "Arquivo do giroscópio",
+        type=["txt"],
+        key="gyro"
+    )
 
-    for column in df.columns:
-        df[column] = pd.to_numeric(
-            df[column],
-            errors="coerce"
+
+if (
+    uploaded_acc is not None and
+    uploaded_gyro is not None
+):
+
+    try:
+
+        # ====================================================
+        # ACELERÔMETRO
+        # ====================================================
+
+        df_acc = read_sensor_file(
+            uploaded_acc,
+            sensor="acc"
         )
 
-    # Remove eventuais cabeçalhos repetidos
-    df = df.dropna().copy()
-
-    df = df.sort_values(
-        "Tempo"
-    )
-
-    df = df.drop_duplicates(
-        subset="Tempo",
-        keep="first"
-    )
-
-    df = df.reset_index(
-        drop=True
-    )
-
-    if len(df) < 20:
-        st.error(
-            "Poucos dados válidos no arquivo."
+        acc = preprocess_sensor(
+            df_acc,
+            sensor="acc"
         )
-        st.stop()
 
-    time = df["Tempo"].to_numpy(
-        dtype=float
-    )
-
-    gx = df["Gyro_X"].to_numpy(
-        dtype=float
-    )
-
-    gy = df["Gyro_Y"].to_numpy(
-        dtype=float
-    )
-
-    gz = df["Gyro_Z"].to_numpy(
-        dtype=float
-    )
-
-
-    # ========================================================
-    # DETREND
-    # ========================================================
-
-    gx = signal.detrend(gx)
-    gy = signal.detrend(gy)
-    gz = signal.detrend(gz)
-
-
-    # ========================================================
-    # INTERPOLAÇÃO PARA 100 Hz
-    # ========================================================
-
-    time_ = np.arange(
-        start=time[0],
-        stop=time[-1],
-        step=10
-    )
-
-    interpf = scipy.interpolate.interp1d(
-        time,
-        gx,
-        kind="linear"
-    )
-
-    gx = interpf(time_)
-
-    interpf = scipy.interpolate.interp1d(
-        time,
-        gy,
-        kind="linear"
-    )
-
-    gy = interpf(time_)
-
-    interpf = scipy.interpolate.interp1d(
-        time,
-        gz,
-        kind="linear"
-    )
-
-    gz = interpf(time_)
-
-    # Tempo em segundos iniciando em zero
-    t = (
-        time_ -
-        time_[0]
-    ) / 1000
-
-
-    # ========================================================
-    # NORMA EUCLIDIANA DO GIROSCÓPIO
-    # ========================================================
-
-    norm_waveform = np.sqrt(
-        gx**2 +
-        gy**2 +
-        gz**2
-    )
-
-
-    # ========================================================
-    # FILTRO EXCLUSIVAMENTE EM 1 Hz
-    # ========================================================
-
-    fs = 100
-
-    norm_1hz = butterworth_filter(
-        norm_waveform,
-        1,
-        fs,
-        order=4,
-        btype='low'
-    )
-
-
-    # ========================================================
-    # K-MEANS NO SINAL DE 1 Hz
-    # ========================================================
-
-    states, centers = kmeans_states(
-        norm_1hz,
-        n_states=int(n_states)
-    )
-
-
-    # ========================================================
-    # BASELINE
-    # ========================================================
-
-    baseline_state, baseline_counts = (
-        baseline_state_detection(
-            t,
-            states,
+        acc_seg = segment_signal(
+            acc["t"],
+            acc["norm_1hz"],
+            n_states=int(n_states),
             baseline_seconds=float(
                 baseline_seconds
             ),
-            n_states=int(n_states)
-        )
-    )
-
-
-    # ========================================================
-    # INÍCIO
-    # ========================================================
-
-    start_index = detect_start(
-        t,
-        states,
-        baseline_state,
-        baseline_seconds=float(
-            baseline_seconds
-        ),
-        sequence_length=int(
-            sequence_length
-        )
-    )
-
-
-    # ========================================================
-    # FINAL
-    # ========================================================
-
-    end_index = detect_end(
-        states,
-        baseline_state,
-        start_index,
-        sequence_length=int(
-            sequence_length
-        )
-    )
-
-
-    # ========================================================
-    # RESULTADOS
-    # ========================================================
-
-    st.subheader(
-        "Resultados da segmentação"
-    )
-
-    col1, col2, col3, col4 = (
-        st.columns(4)
-    )
-
-    col1.metric(
-        "Estado de baseline",
-        baseline_state
-    )
-
-    if start_index is not None:
-
-        start_time = t[
-            start_index
-        ]
-
-        col2.metric(
-            "Início",
-            f"{start_time:.3f} s"
-        )
-
-    else:
-
-        start_time = None
-
-        col2.metric(
-            "Início",
-            "Não encontrado"
-        )
-
-
-    if end_index is not None:
-
-        end_time = t[
-            end_index
-        ]
-
-        col3.metric(
-            "Final",
-            f"{end_time:.3f} s"
-        )
-
-    else:
-
-        end_time = None
-
-        col3.metric(
-            "Final",
-            "Não encontrado"
-        )
-
-
-    if (
-        start_time is not None and
-        end_time is not None
-    ):
-
-        activity_time = (
-            end_time -
-            start_time
-        )
-
-        col4.metric(
-            "Tempo da atividade",
-            f"{activity_time:.3f} s"
-        )
-
-    else:
-
-        activity_time = None
-
-        col4.metric(
-            "Tempo da atividade",
-            "-"
-        )
-
-
-    # ========================================================
-    # GRÁFICO DO SINAL DE 1 Hz
-    # ========================================================
-
-    st.subheader(
-        "Norma euclidiana do giroscópio filtrada em 1 Hz"
-    )
-
-    fig1, ax1 = plt.subplots(
-        figsize=(12, 5)
-    )
-
-    ax1.plot(
-        t,
-        norm_1hz,
-        'k',
-        linewidth=1.5,
-        label="Norma do giroscópio - 1 Hz"
-    )
-
-    ax1.axvspan(
-        0,
-        baseline_seconds,
-        alpha=0.15,
-        label="Baseline inicial"
-    )
-
-    if start_index is not None:
-
-        ax1.axvline(
-            t[start_index],
-            linestyle='--',
-            linewidth=2,
-            label=(
-                f"Início = "
-                f"{t[start_index]:.2f} s"
+            sequence_length=int(
+                sequence_length
             )
         )
 
-    if end_index is not None:
 
-        ax1.axvline(
-            t[end_index],
-            linestyle=':',
-            linewidth=2,
-            label=(
-                f"Fim = "
-                f"{t[end_index]:.2f} s"
+        # ====================================================
+        # GIROSCÓPIO
+        # ====================================================
+
+        df_gyro = read_sensor_file(
+            uploaded_gyro,
+            sensor="gyro"
+        )
+
+        gyro = preprocess_sensor(
+            df_gyro,
+            sensor="gyro"
+        )
+
+        gyro_seg = segment_signal(
+            gyro["t"],
+            gyro["norm_1hz"],
+            n_states=int(n_states),
+            baseline_seconds=float(
+                baseline_seconds
+            ),
+            sequence_length=int(
+                sequence_length
             )
         )
 
-    ax1.set_xlabel(
-        "Tempo (s)"
-    )
 
-    ax1.set_ylabel(
-        "Norma da velocidade angular"
-    )
+        # ====================================================
+        # RESULTADOS EM GRÁFICOS DIFERENTES
+        # ====================================================
 
-    ax1.set_title(
-        "Sinal do giroscópio de 1 Hz utilizado na segmentação"
-    )
-
-    ax1.legend()
-
-    ax1.grid(
-        alpha=0.3
-    )
-
-    st.pyplot(fig1)
-
-
-    # ========================================================
-    # ESTADOS DO K-MEANS
-    # ========================================================
-
-    st.subheader(
-        "Estados do K-means"
-    )
-
-    fig2, ax2 = plt.subplots(
-        figsize=(12, 3.5)
-    )
-
-    ax2.step(
-        t,
-        states,
-        where="post",
-        linewidth=1
-    )
-
-    ax2.axhline(
-        baseline_state,
-        linestyle='--',
-        linewidth=1.5,
-        label=(
-            f"Baseline = "
-            f"estado {baseline_state}"
-        )
-    )
-
-    if start_index is not None:
-
-        ax2.axvline(
-            t[start_index],
-            linestyle='--',
-            linewidth=2
+        acc_results = show_results(
+            "Acelerômetro",
+            acc,
+            acc_seg,
+            baseline_seconds=float(
+                baseline_seconds
+            ),
+            sequence_length=int(
+                sequence_length
+            ),
+            ylabel="Norma da aceleração"
         )
 
-    if end_index is not None:
+        st.divider()
 
-        ax2.axvline(
-            t[end_index],
-            linestyle=':',
-            linewidth=2
+        gyro_results = show_results(
+            "Giroscópio",
+            gyro,
+            gyro_seg,
+            baseline_seconds=float(
+                baseline_seconds
+            ),
+            sequence_length=int(
+                sequence_length
+            ),
+            ylabel="Norma da velocidade angular"
         )
 
-    ax2.set_xlabel(
-        "Tempo (s)"
-    )
 
-    ax2.set_ylabel(
-        "Estado"
-    )
+        # ====================================================
+        # COMPARAÇÃO DOS RESULTADOS
+        # ====================================================
 
-    ax2.set_yticks(
-        np.arange(
-            int(n_states)
+        st.divider()
+
+        st.header(
+            "Comparação entre sensores"
         )
-    )
 
-    ax2.set_title(
-        "Classificação do sinal do giroscópio em estados"
-    )
-
-    ax2.legend()
-
-    ax2.grid(
-        alpha=0.3
-    )
-
-    st.pyplot(fig2)
-
-
-    # ========================================================
-    # CENTRÓIDES
-    # ========================================================
-
-    st.subheader(
-        "Centróides dos estados"
-    )
-
-    centers_df = pd.DataFrame({
-        "Estado": np.arange(
-            int(n_states)
-        ),
-        "Centróide": centers,
-        "N na baseline": (
-            baseline_counts
-        ),
-        "Baseline": [
-            i == baseline_state
-            for i in range(
-                int(n_states)
-            )
-        ]
-    })
-
-    st.dataframe(
-        centers_df,
-        hide_index=True,
-        use_container_width=True
-    )
-
-
-    # ========================================================
-    # MATRIZ DE TRANSIÇÃO
-    # ========================================================
-
-    st.subheader(
-        "Matriz de transição entre estados"
-    )
-
-    matrix = transition_matrix(
-        states,
-        n_states=int(n_states)
-    )
-
-    matrix_df = pd.DataFrame(
-        matrix,
-        index=[
-            f"Estado {i}"
-            for i in range(
-                int(n_states)
-            )
-        ],
-        columns=[
-            f"→ {i}"
-            for i in range(
-                int(n_states)
-            )
-        ]
-    )
-
-    st.dataframe(
-        matrix_df.style.format(
-            "{:.3f}"
-        ),
-        use_container_width=True
-    )
-
-
-    # ========================================================
-    # DADOS PROCESSADOS
-    # ========================================================
-
-    st.subheader(
-        "Dados processados"
-    )
-
-    processed_df = pd.DataFrame({
-        "Tempo_s": t,
-        "Gyro_X_detrend": gx,
-        "Gyro_Y_detrend": gy,
-        "Gyro_Z_detrend": gz,
-        "Norma_1Hz": norm_1hz,
-        "Estado": states
-    })
-
-    processed_df[
-        "Baseline"
-    ] = (
-        states ==
-        baseline_state
-    )
-
-    processed_df[
-        "Inicio"
-    ] = False
-
-    processed_df[
-        "Fim"
-    ] = False
-
-    if start_index is not None:
-
-        processed_df.loc[
-            start_index,
-            "Inicio"
-        ] = True
-
-    if end_index is not None:
-
-        processed_df.loc[
-            end_index,
-            "Fim"
-        ] = True
-
-
-    with st.expander(
-        "Mostrar tabela completa"
-    ):
+        comparison_df = pd.DataFrame({
+            "Sensor": [
+                "Acelerômetro",
+                "Giroscópio"
+            ],
+            "Início_s": [
+                acc_results["start_time"],
+                gyro_results["start_time"]
+            ],
+            "Fim_s": [
+                acc_results["end_time"],
+                gyro_results["end_time"]
+            ],
+            "Duração_s": [
+                acc_results["duration"],
+                gyro_results["duration"]
+            ]
+        })
 
         st.dataframe(
-            processed_df,
+            comparison_df,
+            hide_index=True,
             use_container_width=True
         )
 
 
-    # ========================================================
-    # DOWNLOAD
-    # ========================================================
+        # ====================================================
+        # DADOS PROCESSADOS PARA DOWNLOAD
+        # ====================================================
 
-    csv = processed_df.to_csv(
-        index=False
-    ).encode("utf-8")
+        acc_df_out = pd.DataFrame({
+            "Tempo_s": acc["t"],
+            "Norma_ACC_1Hz": acc[
+                "norm_1hz"
+            ],
+            "Estado_ACC": acc_seg[
+                "states"
+            ]
+        })
 
-    st.download_button(
-        "Baixar dados processados",
-        data=csv,
-        file_name=(
-            "segmentacao_iTUG_giroscopio_1Hz.csv"
-        ),
-        mime="text/csv"
-    )
+        gyro_df_out = pd.DataFrame({
+            "Tempo_s": gyro["t"],
+            "Norma_GYRO_1Hz": gyro[
+                "norm_1hz"
+            ],
+            "Estado_GYRO": gyro_seg[
+                "states"
+            ]
+        })
 
 
-    # ========================================================
-    # REGRA
-    # ========================================================
+        col_down1, col_down2 = st.columns(2)
 
-    with st.expander(
-        "Regra de segmentação"
-    ):
+        with col_down1:
 
-        st.markdown(
-            f"""
-### Sinal analisado
+            st.download_button(
+                "Baixar acelerômetro processado",
+                data=acc_df_out.to_csv(
+                    index=False
+                ).encode("utf-8"),
+                file_name=(
+                    "acelerometro_segmentado_1Hz.csv"
+                ),
+                mime="text/csv"
+            )
 
-Toda a segmentação é realizada exclusivamente sobre
-a **norma euclidiana do giroscópio filtrada em 1 Hz**:
+        with col_down2:
 
-**√(Gx² + Gy² + Gz²)**
+            st.download_button(
+                "Baixar giroscópio processado",
+                data=gyro_df_out.to_csv(
+                    index=False
+                ).encode("utf-8"),
+                file_name=(
+                    "giroscopio_segmentado_1Hz.csv"
+                ),
+                mime="text/csv"
+            )
 
-### Baseline
 
-O estado predominante nos primeiros
-**{baseline_seconds:g} segundos**
-é considerado o estado de baseline.
+    except Exception as e:
 
-### Início
-
-O início é identificado quando:
-
-- a amostra anterior pertence ao estado de baseline;
-- aparecem **{sequence_length} amostras consecutivas**;
-- todas pertencem a estados numericamente superiores
-  ao estado de baseline.
-
-### Final
-
-Após o início, procura-se a **primeira sequência de
-{sequence_length} amostras consecutivas no estado de baseline**.
-
-A primeira amostra dessa sequência é considerada o final.
-"""
+        st.error(
+            f"Erro durante o processamento: {e}"
         )
+
+
+else:
+
+    st.info(
+        "Carregue os arquivos do acelerômetro e do giroscópio para iniciar a análise."
+    )
