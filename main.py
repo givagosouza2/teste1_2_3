@@ -3,7 +3,7 @@ from scipy import signal
 import pandas as pd
 import numpy as np
 import scipy
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, find_peaks
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 
@@ -12,6 +12,30 @@ def butterworth_filter(data, cutoff, fs, order=4, btype='low'):
     nyquist = 0.5 * fs
     normal_cutoff = cutoff / nyquist
     b, a = butter(order, normal_cutoff, btype=btype, analog=False)
+    return filtfilt(b, a, data)
+
+
+def bandpass_filter(data, lowcut, highcut, fs, order=4):
+    """
+    Filtro Butterworth passa-banda com fase zero.
+    """
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+
+    if not (0 < low < high < 1):
+        raise ValueError(
+            "As frequências do passa-banda devem obedecer: "
+            "0 < baixa < alta < Nyquist."
+        )
+
+    b, a = butter(
+        order,
+        [low, high],
+        btype="bandpass",
+        analog=False
+    )
+
     return filtfilt(b, a, data)
 
 
@@ -211,6 +235,82 @@ def calculate_motion_features(t, signal_data, start_index, end_index, baseline_s
     }
 
 
+
+def calculate_steps(
+    t,
+    norm_signal,
+    start_index,
+    end_index,
+    fs=100,
+    lowcut=1.0,
+    highcut=5.0,
+    filter_order=4,
+    min_peak_distance_s=0.30,
+    prominence_factor=0.20
+):
+    """
+    Filtra a norma euclidiana entre 1 e 5 Hz e detecta picos
+    dentro do intervalo segmentado da atividade.
+
+    prominence_factor é multiplicado pelo desvio-padrão do
+    sinal passa-banda dentro da atividade.
+    """
+    band_signal = bandpass_filter(
+        norm_signal,
+        lowcut=lowcut,
+        highcut=highcut,
+        fs=fs,
+        order=filter_order
+    )
+
+    if start_index is None or end_index is None or end_index <= start_index:
+        return {
+            "band_signal": band_signal,
+            "peaks": np.array([], dtype=int),
+            "n_steps": None,
+            "cadence": None,
+            "prominence_used": None
+        }
+
+    movement = band_signal[start_index:end_index + 1]
+
+    min_distance_samples = max(
+        1,
+        int(round(min_peak_distance_s * fs))
+    )
+
+    movement_std = float(np.std(movement))
+    prominence = max(
+        np.finfo(float).eps,
+        prominence_factor * movement_std
+    )
+
+    local_peaks, properties = find_peaks(
+        movement,
+        distance=min_distance_samples,
+        prominence=prominence
+    )
+
+    peaks = local_peaks + start_index
+    n_steps = int(len(peaks))
+
+    duration = float(t[end_index] - t[start_index])
+
+    cadence = (
+        60.0 * n_steps / duration
+        if duration > 0
+        else np.nan
+    )
+
+    return {
+        "band_signal": band_signal,
+        "peaks": peaks,
+        "n_steps": n_steps,
+        "cadence": float(cadence),
+        "prominence_used": float(prominence)
+    }
+
+
 st.set_page_config(page_title="iTUG - Características do Acelerômetro", layout="wide")
 st.title("Segmentação e extração de características do acelerômetro")
 
@@ -220,6 +320,22 @@ baseline_seconds = st.sidebar.number_input("Baseline inicial (s)", 0.5, 10.0, 2.
 sequence_length = st.sidebar.number_input("Amostras consecutivas", 1, 500, 5, 1)
 filter_cutoff = st.sidebar.number_input("Frequência de corte do filtro (Hz)", 0.1, 20.0, 1.0, 0.1)
 filter_order = st.sidebar.number_input("Ordem do filtro Butterworth", 1, 8, 4, 1)
+
+st.sidebar.markdown("### Detecção de passos")
+min_peak_distance_s = st.sidebar.number_input(
+    "Distância mínima entre picos (s)",
+    min_value=0.10,
+    max_value=1.50,
+    value=0.30,
+    step=0.05
+)
+prominence_factor = st.sidebar.number_input(
+    "Prominência mínima (× DP do sinal)",
+    min_value=0.00,
+    max_value=3.00,
+    value=0.20,
+    step=0.05
+)
 
 uploaded_acc = st.file_uploader("Arquivo do acelerômetro", type=["txt"])
 
@@ -259,6 +375,67 @@ if uploaded_acc is not None:
             baseline_seconds=float(baseline_seconds)
         )
 
+        # Velocidade média para percurso conhecido de 4 m
+        walking_speed = None
+        if features is not None and features["total_duration"] > 0:
+            walking_speed = 4.0 / features["total_duration"]
+
+        # Para detecção de passos usamos a norma euclidiana antes
+        # do passa-baixa principal, filtrada separadamente entre 1 e 5 Hz.
+        # Reconstrói a norma interpolada sem o filtro principal.
+        # Como preprocess_accelerometer retorna apenas a norma filtrada,
+        # reutilizamos os dados originais para obter a norma de trabalho.
+        time_raw = df["Tempo"].to_numpy(float)
+        x_raw = df["X"].to_numpy(float)
+        y_raw = df["Y"].to_numpy(float)
+        z_raw = df["Z"].to_numpy(float)
+
+        if (
+            np.max(np.abs(x_raw)) > 9 or
+            np.max(np.abs(y_raw)) > 9 or
+            np.max(np.abs(z_raw)) > 9
+        ):
+            x_raw = x_raw / 9.81
+            y_raw = y_raw / 9.81
+            z_raw = z_raw / 9.81
+
+        x_raw = signal.detrend(x_raw)
+        y_raw = signal.detrend(y_raw)
+        z_raw = signal.detrend(z_raw)
+
+        time_uniform_steps = np.arange(
+            start=time_raw[0],
+            stop=time_raw[-1],
+            step=10
+        )
+
+        x_steps = scipy.interpolate.interp1d(
+            time_raw, x_raw, kind="linear"
+        )(time_uniform_steps)
+        y_steps = scipy.interpolate.interp1d(
+            time_raw, y_raw, kind="linear"
+        )(time_uniform_steps)
+        z_steps = scipy.interpolate.interp1d(
+            time_raw, z_raw, kind="linear"
+        )(time_uniform_steps)
+
+        norm_for_steps = np.sqrt(
+            x_steps**2 + y_steps**2 + z_steps**2
+        )
+
+        step_results = calculate_steps(
+            t,
+            norm_for_steps,
+            start_index,
+            end_index,
+            fs=100,
+            lowcut=1.0,
+            highcut=5.0,
+            filter_order=int(filter_order),
+            min_peak_distance_s=float(min_peak_distance_s),
+            prominence_factor=float(prominence_factor)
+        )
+
         st.header("Segmentação")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Estado de baseline", baseline_state)
@@ -268,13 +445,26 @@ if uploaded_acc is not None:
 
         if features is not None:
             st.header("Características extraídas")
-            f1, f2, f3, f4, f5, f6 = st.columns(6)
+            f1, f2, f3, f4 = st.columns(4)
             f1.metric("Duração total", f"{features['total_duration']:.3f} s")
-            f2.metric("Pico de amplitude", f"{features['peak_amplitude']:.4f} {acc['unit']}")
-            f3.metric("Latência do pico", f"{features['peak_latency']:.3f} s")
-            f4.metric("Tempo de aceleração", f"{features['acceleration_time']:.3f} s")
-            f5.metric("Tempo de desaceleração", f"{features['deceleration_time']:.3f} s")
+            f2.metric("Velocidade de marcha", f"{walking_speed:.3f} m/s")
+            f3.metric("Pico de amplitude", f"{features['peak_amplitude']:.4f} {acc['unit']}")
+            f4.metric("Latência do pico", f"{features['peak_latency']:.3f} s")
+
+            f5, f6, f7, f8 = st.columns(4)
+            f5.metric("Tempo de aceleração", f"{features['acceleration_time']:.3f} s")
             f6.metric("Tempo entre 90%", f"{features['time_between_90']:.3f} s")
+            f7.metric("Tempo de desaceleração", f"{features['deceleration_time']:.3f} s")
+            f8.metric(
+                "Passos estimados",
+                str(step_results["n_steps"]) if step_results["n_steps"] is not None else "-"
+            )
+
+            if step_results["cadence"] is not None:
+                st.caption(
+                    f"Cadência estimada: **{step_results['cadence']:.1f} passos/min** "
+                    f"(picos detectados no sinal passa-banda de 1–5 Hz)."
+                )
 
             st.subheader("Sinal segmentado e eventos temporais")
             fig, ax = plt.subplots(figsize=(13, 5))
@@ -299,9 +489,75 @@ if uploaded_acc is not None:
             ax.legend(loc="best", fontsize=9)
             st.pyplot(fig)
 
+            # =================================================
+            # SEGUNDO GRÁFICO: PASSA-BANDA 1–5 Hz E PICOS
+            # =================================================
+            st.subheader("Sinal passa-banda de 1–5 Hz e picos detectados")
+
+            fig_steps, ax_steps = plt.subplots(figsize=(13, 4.5))
+
+            band_signal = step_results["band_signal"]
+            peaks = step_results["peaks"]
+
+            ax_steps.plot(
+                t,
+                band_signal,
+                linewidth=1.2,
+                label="Norma euclidiana passa-banda 1–5 Hz"
+            )
+
+            ax_steps.axvspan(
+                features["start_time"],
+                features["end_time"],
+                alpha=0.10,
+                label="Intervalo do movimento"
+            )
+
+            ax_steps.axvline(
+                features["start_time"],
+                linestyle="--",
+                linewidth=1.5,
+                label="Início"
+            )
+
+            ax_steps.axvline(
+                features["end_time"],
+                linestyle=":",
+                linewidth=1.5,
+                label="Fim"
+            )
+
+            if len(peaks) > 0:
+                ax_steps.scatter(
+                    t[peaks],
+                    band_signal[peaks],
+                    s=45,
+                    zorder=5,
+                    label=f"Picos detectados = {len(peaks)}"
+                )
+
+            ax_steps.set_xlabel("Tempo (s)")
+            ax_steps.set_ylabel(f"Aceleração filtrada ({acc['unit']})")
+            ax_steps.set_title(
+                "Detecção de passos pela contagem de picos no sinal de 1–5 Hz"
+            )
+            ax_steps.grid(alpha=0.3)
+            ax_steps.legend(loc="best", fontsize=9)
+
+            st.pyplot(fig_steps)
+
+            st.caption(
+                "A contagem de picos é uma estimativa do número de passos. "
+                "Os parâmetros de distância mínima entre picos e prominência "
+                "podem ser ajustados na barra lateral."
+            )
+
             features_df = pd.DataFrame({
                 "Característica": [
                     "Duração total",
+                    "Velocidade de marcha",
+                    "Número de passos estimado",
+                    "Cadência estimada",
                     "Pico de amplitude",
                     "Latência do pico",
                     "Tempo de aceleração",
@@ -317,6 +573,9 @@ if uploaded_acc is not None:
                 ],
                 "Valor": [
                     features["total_duration"],
+                    walking_speed,
+                    step_results["n_steps"],
+                    step_results["cadence"],
                     features["peak_amplitude"],
                     features["peak_latency"],
                     features["acceleration_time"],
@@ -331,7 +590,7 @@ if uploaded_acc is not None:
                     features["end_time"]
                 ],
                 "Unidade": [
-                    "s", acc["unit"], "s", "s", "s", "s", acc["unit"],
+                    "s", "m/s", "passos", "passos/min", acc["unit"], "s", "s", "s", "s", acc["unit"],
                     acc["unit"], "s", "s", "s", "s", "s"
                 ]
             })
