@@ -192,6 +192,7 @@ def calculate_motion_features(t, signal_data, start_index, end_index, baseline_s
         post90_time = float(t[nearest_idx])
 
     deceleration_time = float(t[end_index]) - post90_time
+    time_between_90 = post90_time - pre90_time
 
     return {
         "start_time": float(t[start_index]),
@@ -205,7 +206,8 @@ def calculate_motion_features(t, signal_data, start_index, end_index, baseline_s
         "pre90_time": float(pre90_time),
         "acceleration_time": float(acceleration_time),
         "post90_time": float(post90_time),
-        "deceleration_time": float(deceleration_time)
+        "deceleration_time": float(deceleration_time),
+        "time_between_90": float(time_between_90)
     }
 
 
@@ -266,12 +268,13 @@ if uploaded_acc is not None:
 
         if features is not None:
             st.header("Características extraídas")
-            f1, f2, f3, f4, f5 = st.columns(5)
+            f1, f2, f3, f4, f5, f6 = st.columns(6)
             f1.metric("Duração total", f"{features['total_duration']:.3f} s")
             f2.metric("Pico de amplitude", f"{features['peak_amplitude']:.4f} {acc['unit']}")
             f3.metric("Latência do pico", f"{features['peak_latency']:.3f} s")
             f4.metric("Tempo de aceleração", f"{features['acceleration_time']:.3f} s")
             f5.metric("Tempo de desaceleração", f"{features['deceleration_time']:.3f} s")
+            f6.metric("Tempo entre 90%", f"{features['time_between_90']:.3f} s")
 
             st.subheader("Sinal segmentado e eventos temporais")
             fig, ax = plt.subplots(figsize=(13, 5))
@@ -303,6 +306,7 @@ if uploaded_acc is not None:
                     "Latência do pico",
                     "Tempo de aceleração",
                     "Tempo de desaceleração",
+                    "Tempo entre 90% pré e pós-pico",
                     "Baseline média",
                     "Limiar de 90%",
                     "Tempo do início",
@@ -317,6 +321,7 @@ if uploaded_acc is not None:
                     features["peak_latency"],
                     features["acceleration_time"],
                     features["deceleration_time"],
+                    features["time_between_90"],
                     features["baseline_value"],
                     features["threshold_90"],
                     features["start_time"],
@@ -326,7 +331,7 @@ if uploaded_acc is not None:
                     features["end_time"]
                 ],
                 "Unidade": [
-                    "s", acc["unit"], "s", "s", "s", acc["unit"],
+                    "s", acc["unit"], "s", "s", "s", "s", acc["unit"],
                     acc["unit"], "s", "s", "s", "s", "s"
                 ]
             })
