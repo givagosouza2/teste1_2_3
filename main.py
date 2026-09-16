@@ -131,7 +131,7 @@ def calculate_filtered_norms(
     y,
     z,
     fs=100.0,
-    cutoffs=(1.0, 4.0, 10.0),
+    cutoffs=(0.5),
     order=4
 ):
     """
