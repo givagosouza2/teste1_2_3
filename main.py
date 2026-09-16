@@ -223,20 +223,19 @@ def transition_matrix(states, n_states=5):
 # ============================================================
 
 st.set_page_config(
-    page_title="Segmentação iTUG - 1 Hz",
+    page_title="Segmentação iTUG - Giroscópio 1 Hz",
     layout="wide"
 )
 
 st.title(
-    "Segmentação automática do sinal de acelerometria"
+    "Segmentação automática do sinal do giroscópio"
 )
 
 st.write(
     """
-    O sinal é normalizado quando necessário, submetido a detrend,
-    interpolado para 100 Hz e convertido em norma euclidiana.
-    A norma euclidiana é então filtrada exclusivamente em
-    **1 Hz** e este sinal é utilizado para toda a segmentação.
+    O sinal do giroscópio é submetido a detrend, interpolado para 100 Hz,
+    convertido em norma euclidiana e filtrado em **1 Hz**.
+    A segmentação é realizada sobre essa norma filtrada usando K-means.
     """
 )
 
@@ -278,13 +277,13 @@ sequence_length = st.sidebar.number_input(
 # UPLOAD
 # ============================================================
 
-uploaded_acc_iTUG = st.file_uploader(
-    "Carregue o arquivo de texto do acelerômetro",
+uploaded_gyro_iTUG = st.file_uploader(
+    "Carregue o arquivo de texto do giroscópio",
     type=["txt"]
 )
 
 
-if uploaded_acc_iTUG is not None:
+if uploaded_gyro_iTUG is not None:
 
     # ========================================================
     # LEITURA
@@ -293,7 +292,7 @@ if uploaded_acc_iTUG is not None:
     custom_separator = ';'
 
     df = pd.read_csv(
-        uploaded_acc_iTUG,
+        uploaded_gyro_iTUG,
         sep=custom_separator,
         dtype=str
     )
@@ -302,9 +301,9 @@ if uploaded_acc_iTUG is not None:
 
     df.columns = [
         "Tempo",
-        "Acc_X",
-        "Acc_Y",
-        "Acc_Z"
+        "Gyro_X",
+        "Gyro_Y",
+        "Gyro_Z"
     ]
 
     for column in df.columns:
@@ -339,48 +338,26 @@ if uploaded_acc_iTUG is not None:
         dtype=float
     )
 
-    x = df["Acc_X"].to_numpy(
+    gx = df["Gyro_X"].to_numpy(
         dtype=float
     )
 
-    y = df["Acc_Y"].to_numpy(
+    gy = df["Gyro_Y"].to_numpy(
         dtype=float
     )
 
-    z = df["Acc_Z"].to_numpy(
+    gz = df["Gyro_Z"].to_numpy(
         dtype=float
     )
 
 
     # ========================================================
-    # NORMALIZAÇÃO E DETREND
+    # DETREND
     # ========================================================
 
-    if (
-        np.max(np.abs(x)) > 9 or
-        np.max(np.abs(y)) > 9 or
-        np.max(np.abs(z)) > 9
-    ):
-        x = signal.detrend(
-            x / 9.81
-        )
-
-        y = signal.detrend(
-            y / 9.81
-        )
-
-        z = signal.detrend(
-            z / 9.81
-        )
-
-        unidade = "g"
-
-    else:
-        x = signal.detrend(x)
-        y = signal.detrend(y)
-        z = signal.detrend(z)
-
-        unidade = "unidade original"
+    gx = signal.detrend(gx)
+    gy = signal.detrend(gy)
+    gz = signal.detrend(gz)
 
 
     # ========================================================
@@ -395,27 +372,27 @@ if uploaded_acc_iTUG is not None:
 
     interpf = scipy.interpolate.interp1d(
         time,
-        x,
+        gx,
         kind="linear"
     )
 
-    x = interpf(time_)
+    gx = interpf(time_)
 
     interpf = scipy.interpolate.interp1d(
         time,
-        y,
+        gy,
         kind="linear"
     )
 
-    y = interpf(time_)
+    gy = interpf(time_)
 
     interpf = scipy.interpolate.interp1d(
         time,
-        z,
+        gz,
         kind="linear"
     )
 
-    z = interpf(time_)
+    gz = interpf(time_)
 
     # Tempo em segundos iniciando em zero
     t = (
@@ -425,13 +402,13 @@ if uploaded_acc_iTUG is not None:
 
 
     # ========================================================
-    # NORMA EUCLIDIANA
+    # NORMA EUCLIDIANA DO GIROSCÓPIO
     # ========================================================
 
     norm_waveform = np.sqrt(
-        x**2 +
-        y**2 +
-        z**2
+        gx**2 +
+        gy**2 +
+        gz**2
     )
 
 
@@ -596,7 +573,7 @@ if uploaded_acc_iTUG is not None:
     # ========================================================
 
     st.subheader(
-        "Norma euclidiana filtrada em 1 Hz"
+        "Norma euclidiana do giroscópio filtrada em 1 Hz"
     )
 
     fig1, ax1 = plt.subplots(
@@ -608,7 +585,7 @@ if uploaded_acc_iTUG is not None:
         norm_1hz,
         'k',
         linewidth=1.5,
-        label="Norma euclidiana - 1 Hz"
+        label="Norma do giroscópio - 1 Hz"
     )
 
     ax1.axvspan(
@@ -647,11 +624,11 @@ if uploaded_acc_iTUG is not None:
     )
 
     ax1.set_ylabel(
-        f"Norma da aceleração ({unidade})"
+        "Norma da velocidade angular"
     )
 
     ax1.set_title(
-        "Sinal de 1 Hz utilizado na segmentação"
+        "Sinal do giroscópio de 1 Hz utilizado na segmentação"
     )
 
     ax1.legend()
@@ -723,7 +700,7 @@ if uploaded_acc_iTUG is not None:
     )
 
     ax2.set_title(
-        "Classificação do sinal de 1 Hz em estados"
+        "Classificação do sinal do giroscópio em estados"
     )
 
     ax2.legend()
@@ -813,6 +790,9 @@ if uploaded_acc_iTUG is not None:
 
     processed_df = pd.DataFrame({
         "Tempo_s": t,
+        "Gyro_X_detrend": gx,
+        "Gyro_Y_detrend": gy,
+        "Gyro_Z_detrend": gz,
         "Norma_1Hz": norm_1hz,
         "Estado": states
     })
@@ -869,7 +849,7 @@ if uploaded_acc_iTUG is not None:
         "Baixar dados processados",
         data=csv,
         file_name=(
-            "segmentacao_iTUG_1Hz.csv"
+            "segmentacao_iTUG_giroscopio_1Hz.csv"
         ),
         mime="text/csv"
     )
@@ -888,7 +868,9 @@ if uploaded_acc_iTUG is not None:
 ### Sinal analisado
 
 Toda a segmentação é realizada exclusivamente sobre
-a **norma euclidiana filtrada em 1 Hz**.
+a **norma euclidiana do giroscópio filtrada em 1 Hz**:
+
+**√(Gx² + Gy² + Gz²)**
 
 ### Baseline
 
